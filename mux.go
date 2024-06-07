@@ -12,6 +12,7 @@ type Mux struct {
 	notFoundHandler         HandlerFunc
 	methodNotAllowedHandler HandlerFunc
 	errorHandler            func(ctx *Context, err error)
+	inline                  bool
 }
 
 func NewMux() *Mux {
@@ -22,7 +23,53 @@ func NewMux() *Mux {
 		notFoundHandler:         DefaultNotFoundHandler,
 		methodNotAllowedHandler: DefaultMethodNotAllowedHandler,
 		errorHandler:            DefaultErrorHandler,
+		inline:                  false,
 	}
+}
+
+type Router interface {
+	http.Handler
+
+	Handle(pattern string, fn HandlerFunc)
+	WebSocket(pattern string, fn WebSocketFunc)
+	Use(middlewares ...MiddlewareFunc)
+	Mount(prefix string, router Router)
+	Route(prefix string, fn func(router Router))
+	Static(prefix, root string)
+	File(path, file string)
+}
+
+func NewRouter() Router {
+	return &Mux{
+		mux:                     http.NewServeMux(),
+		handler:                 nil,
+		middlewares:             make([]MiddlewareFunc, 0),
+		notFoundHandler:         nil,
+		methodNotAllowedHandler: nil,
+		errorHandler:            nil,
+		inline:                  true,
+	}
+}
+
+func (m *Mux) Static(prefix, root string) {
+	if m.handler == nil {
+		m.buildHandler()
+	}
+
+	trimmed := strings.TrimRight(prefix, "/")
+	prefix = trimmed + "/"
+
+	m.mux.Handle(prefix, http.StripPrefix(prefix, http.FileServer(http.Dir(root))))
+}
+
+func (m *Mux) File(path, file string) {
+	if m.handler == nil {
+		m.buildHandler()
+	}
+
+	m.mux.Handle(path, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, file)
+	}))
 }
 
 func (m *Mux) Handle(pattern string, fn HandlerFunc) {
@@ -46,7 +93,7 @@ func (m *Mux) Use(middlewares ...MiddlewareFunc) {
 	m.middlewares = append(m.middlewares, middlewares...)
 }
 
-func (m *Mux) Mount(prefix string, router *Router) {
+func (m *Mux) Mount(prefix string, router Router) {
 	if m.handler == nil {
 		m.buildHandler()
 	}
@@ -57,7 +104,7 @@ func (m *Mux) Mount(prefix string, router *Router) {
 	m.mux.Handle(prefix, http.StripPrefix(trimmed, router))
 }
 
-func (m *Mux) Route(prefix string, fn func(router *Router)) {
+func (m *Mux) Route(prefix string, fn func(router Router)) {
 	if m.handler == nil {
 		m.buildHandler()
 	}
@@ -87,20 +134,37 @@ func (m *Mux) MethodNotAllowed(fn HandlerFunc) {
 	m.methodNotAllowedHandler = fn
 }
 
-func (m *Mux) routeHTTP(ctx *Context) error {
-	m.mux.ServeHTTP(ctx.responseWriter, ctx.request)
-
-	switch ctx.statusCode {
-	case http.StatusNotFound:
-		return m.notFoundHandler(ctx)
-	case http.StatusMethodNotAllowed:
-		return m.methodNotAllowedHandler(ctx)
+func (m *Mux) provideHandler() HandlerFunc {
+	if m.inline {
+		return func(ctx *Context) error {
+			m.mux.ServeHTTP(ctx.responseWriter, ctx.request)
+			return ctx.err
+		}
 	}
 
-	return ctx.err
+	return func(ctx *Context) error {
+		m.mux.ServeHTTP(ctx.responseWriter, ctx.request)
+
+		switch ctx.statusCode {
+		case http.StatusNotFound:
+			return m.notFoundHandler(ctx)
+		case http.StatusMethodNotAllowed:
+			return m.methodNotAllowedHandler(ctx)
+		}
+
+		return ctx.err
+	}
 }
 
 func (m *Mux) provideContext(next HandlerFunc) http.HandlerFunc {
+	if m.inline {
+		return func(w http.ResponseWriter, r *http.Request) {
+			ctx := extractContext(r)
+			ctx.request = r
+			ctx.err = next(ctx)
+		}
+	}
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := &Context{
 			Context:        r.Context(),
@@ -123,6 +187,10 @@ func (m *Mux) provideContext(next HandlerFunc) http.HandlerFunc {
 }
 
 func (m *Mux) provideErrorHandler(next HandlerFunc) HandlerFunc {
+	if m.inline {
+		return next
+	}
+
 	return func(ctx *Context) error {
 		if err := next(ctx); err != nil {
 			m.errorHandler(ctx, err)
@@ -132,7 +200,7 @@ func (m *Mux) provideErrorHandler(next HandlerFunc) HandlerFunc {
 }
 
 func (m *Mux) buildHandler() {
-	handler := m.routeHTTP
+	handler := m.provideHandler()
 
 	for i := len(m.middlewares) - 1; i >= 0; i-- {
 		middleware := m.middlewares[i]
