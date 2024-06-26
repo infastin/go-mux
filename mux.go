@@ -1,6 +1,7 @@
 package mux
 
 import (
+	"io/fs"
 	"net/http"
 	"strings"
 )
@@ -62,6 +63,17 @@ func (m *Mux) Static(prefix, root string) {
 	m.mux.Handle(prefix, http.StripPrefix(prefix, http.FileServer(http.Dir(root))))
 }
 
+func (m *Mux) StaticFS(prefix string, root fs.FS) {
+	if m.handler == nil {
+		m.buildHandler()
+	}
+
+	trimmed := strings.TrimPrefix(prefix, "/")
+	prefix = trimmed + "/"
+
+	m.mux.Handle(prefix, http.StripPrefix(prefix, http.FileServerFS(root)))
+}
+
 func (m *Mux) File(path, file string) {
 	if m.handler == nil {
 		m.buildHandler()
@@ -69,6 +81,16 @@ func (m *Mux) File(path, file string) {
 
 	m.mux.Handle(path, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, file)
+	}))
+}
+
+func (m *Mux) FileFS(path string, fsys fs.FS, file string) {
+	if m.handler == nil {
+		m.buildHandler()
+	}
+
+	m.mux.Handle(path, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFileFS(w, r, fsys, file)
 	}))
 }
 
