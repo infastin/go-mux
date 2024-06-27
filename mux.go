@@ -37,7 +37,9 @@ type Router interface {
 	Mount(prefix string, router Router)
 	Route(prefix string, fn func(router Router))
 	Static(prefix, root string)
+	StaticFS(prefix string, root fs.FS)
 	File(path, file string)
+	FileFS(path string, fsys fs.FS, file string)
 }
 
 func NewRouter() Router {
